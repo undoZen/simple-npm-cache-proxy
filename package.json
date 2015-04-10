@@ -1,0 +1,39 @@
+{
+  "name": "simple-npm-cache-proxy",
+  "version": "0.0.0",
+  "description": "a simple npm proxy cache package locally",
+  "main": "server.js",
+  "scripts": {
+    "test": "prove --exec iojs test/*.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/undoZen/simple-npm-cache-proxy.git"
+  },
+  "keywords": [
+    "npm"
+  ],
+  "author": "undoZen <opensource@undozen.com>",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/undoZen/simple-npm-cache-proxy/issues"
+  },
+  "homepage": "https://github.com/undoZen/simple-npm-cache-proxy",
+  "dependencies": {
+    "bluebird": "^2.9.24",
+    "bunyan-hub-logger": "^1.1.0",
+    "co": "^4.5.1",
+    "concat-stream": "^1.4.8",
+    "config": "^1.12.0",
+    "level": "^0.18.0",
+    "lodash": "^3.6.0",
+    "mkdirp": "^0.5.0",
+    "request": "^2.55.0",
+    "simple-http-proxy": "^0.5.11",
+    "st": "^0.5.3"
+  },
+  "devDependencies": {
+    "rimraf": "^2.3.2",
+    "tape": "^4.0.0"
+  }
+}
