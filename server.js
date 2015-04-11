@@ -15,10 +15,14 @@ var db = require('level-sublevel')(require('level')(config.db.path, _.assign({},
 })));
 var dbCache = db.sublevel('cache');
 var dbCacheJson = dbCache.sublevel('json');
-require('bunyan-hub-logger/replaceDebug')('simple-npm-cache-proxy');
-var log = require('bunyan-hub-logger')({
+var logger = require('bunyan-hub-logger');
+logger.replaceDebug('simple-npm-cache-proxy');
+var log = logger({
     app: 'simple-npm-cache-proxy',
     name: 'server',
+    serializers: {
+        response: logger.stdSerializers.res
+    },
 });
 var Schedule = require('level-schedule');
 var dbSchedule = db.sublevel('schedule');
@@ -119,7 +123,7 @@ var proxyPublic = function(req, res) {
             timeout: false,
             onresponse: function(response, res) {
                 log.debug({
-                    //response: response,
+                    response: response,
                     req: req,
                     res: res,
                 });
@@ -166,7 +170,7 @@ var proxyPublic = function(req, res) {
                 } else {
                     log.debug({
                         unknownContentType: true,
-                        //response: response
+                        response: response
                     });
                     res.writeHead(response.statusCode, headers);
                     response.pipe(res);
