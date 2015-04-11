@@ -1,7 +1,7 @@
 'use strict';
 global.Promise = require('bluebird');
 var http = require('http');
-http.globalAgent.maxSockets = 20;
+http.globalAgent.maxSockets = 5000;
 var path = require('path');
 var fs = require('fs');
 var _ = require('lodash');
@@ -10,7 +10,7 @@ var co = require('co');
 var request = require('superagent');
 var mkdirp = require('mkdirp');
 var concat = require('concat-stream');
-var db = require('level-sublevel')(require('level')(config.db.path, _.assign({}, config.db.config, {
+var db = require('level-sublevel')(require('level')(config.db.path, xtend(config.db.config, {
     valueEncoding: 'json'
 })));
 var dbCache = db.sublevel('cache');
@@ -21,7 +21,7 @@ var log = logger({
     app: 'simple-npm-cache-proxy',
     name: 'server',
     serializers: {
-        response: logger.stdSerializers.res
+        //response: logger.stdSerializers.res
     },
 });
 var Schedule = require('level-schedule');
@@ -37,13 +37,26 @@ function replaceBodyRegistry(body) {
     return body.replace(config.replaceHost[0], config.replaceHost[1]);
 }
 
+function xtend() {
+    var args = Array.prototype.slice.call(arguments);
+    args.unshift({});
+    return _.assign.apply(_, args);
+}
+
 var schedule = Schedule(dbSchedule);
+/*
+ * payload: {
+ *   url,
+ *   etag,
+ *   registry: public | private
+ * }
+ */
 schedule.job('update', function(payload, done) {
     log.trace({
         job: 'update',
         payload: payload,
     });
-    request.get(config.registry.public + payload.url)
+    request.get(config.registry[payload.registry] + payload.url)
         .set('if-none-match', payload.etag)
         .end(co.wrap(function * (err, r) {
             log.trace({
@@ -62,7 +75,7 @@ schedule.job('update', function(payload, done) {
                 var body = replaceBodyRegistry(r.text);
                 var cacheObject = {
                     statusCode: r.statusCode,
-                    headers: _.assign({}, pickTarballHeaders(r.headers), {
+                    headers: xtend(pickTarballHeaders(r.headers), {
                         'content-length': Buffer.byteLength(body)
                     }),
                     etag: r.headers.etag,
@@ -74,10 +87,9 @@ schedule.job('update', function(payload, done) {
                 });
                 yield dbCacheJson.putAsync(payload.url, cacheObject);
             }
-            schedule.run('update', {
-                url: payload.url,
+            schedule.run('update', xtend(payload, {
                 etag: r.headers.etag,
-            }, Date.now() + 60000);
+            }), Date.now() + 60000);
             done();
         }));
 });
@@ -112,79 +124,118 @@ function pickTarballHeaders(headers) {
     ]);
 }
 
-var proxy = require('simple-http-proxy');
-var proxyPrivate = proxy(config.registry.private);
-var proxyPublic = function(req, res) {
+function onresponse(response, res) {
+    var req = res.req;
+    log.debug({
+        response: response,
+        req: req,
+        res: res,
+    });
+    res.on('finish', res._proxyResolve);
+    var headers = response.headers;
+    // cache tarball
+    if (config.cache[res._proxyRigestry] && req.method === 'GET' &&
+        headers['content-type'] === 'application/octet-stream') {
+        var filePath = path.resolve(config.tarballCacheDir, req.url.replace(/^\/+/, ''));
+        mkdirp.sync(path.dirname(filePath));
+        var fileStream = fs.createWriteStream(filePath);
+        response.pipe(fileStream);
+        res.writeHead(response.statusCode, pickTarballHeaders(headers));
+        response.on('data', res.write.bind(res));
+        response.on('end', res.end.bind(res));
+    }
+    // cache json
+    else if (config.cache[res._proxyRigestry] && req.method === 'GET' &&
+        typeof headers['etag'] === 'string' &&
+        (headers['content-type'] || '').match(/^application\/json/i)) {
+        response.pipe(concat(function(data) {
+            var body = data.toString('utf8');
+            log.debug({
+                req: req,
+                body: body,
+            });
+            body = replaceBodyRegistry(body);
+            headers = xtend(headers, {
+                'content-length': Buffer.byteLength(body)
+            });
+            log.debug({
+                req: req,
+                headers: headers,
+                replacedBody: body,
+            });
+            res.writeHead(response.statusCode, headers);
+            res.end(body);
+            dbCacheJson.put(req.url, {
+                statusCode: response.statusCode,
+                headers: headers,
+                body: body,
+                etag: headers.etag,
+            });
+            schedule.run('update', {
+                registry: res._proxyRigestry,
+                url: req.url,
+                etag: headers.etag,
+            }, Date.now() + 60000);
+        }));
+    } else {
+        log.debug({
+            proxyDirectly: true,
+            response: response
+        });
+        return false;
+    }
+    return true;
+}
+
+var simpleHttpProxy = require('simple-http-proxy');
+var proxy2 = {
+    public: simpleHttpProxy(config.registry.public, {
+        timeout: false,
+        onresponse: onresponse,
+    }),
+    private: simpleHttpProxy(config.registry.private, {
+        timeout: false,
+        onresponse: onresponse,
+    }),
+};
+
+var proxy = co.wrap(function * (registry, req, res) {
+    if (req.method === 'GET') {
+        var cache = yield dbCacheJson.getAsync(req.url).catch(function(err) {
+            return false;
+        })
+        if (cache) {
+            log.debug({
+                req: req,
+                cachedObject: cache
+            });
+            if ('if-none-match' in req.headers && req.headers['if-none-match'] === cache.etag) {
+                cache.headers['content-length'] = 0;
+                res.writeHead(304, cache.headers);
+                res.end();
+            }
+            res.writeHead(cache.statusCode, cache.headers);
+            res.end(cache.body);
+            return;
+        }
+    }
     if ('if-none-match' in req.headers) { // make sure upstream return 200 instead of 304
         delete req.headers['if-none-match'];
     }
+    if ('accept-encoding' in req.headers) { // remove gzip, get raw text body
+        delete req.headers['accept-encoding'];
+    }
+
     return new Promise(function(resolve, reject) {
-        proxy(config.registry.public, {
-            timeout: false,
-            onresponse: function(response, res) {
-                log.debug({
-                    response: response,
-                    req: req,
-                    res: res,
-                });
-                var headers = response.headers;
-                if (headers['content-type'] === 'application/octet-stream') {
-                    var filePath = path.resolve(config.tarballCacheDir, req.url.replace(/^\/+/, ''));
-                    mkdirp.sync(path.dirname(filePath));
-                    var fileStream = fs.createWriteStream(filePath);
-                    response.pipe(fileStream);
-                    res.writeHead(response.statusCode, pickTarballHeaders(headers));
-                    response.on('data', res.write.bind(res));
-                    response.on('end', res.end.bind(res));
-                } else if (typeof headers['content-type'] === 'string' &&
-                    headers['content-type'].match(/^application\/json/i)) {
-                    res.on('finish', resolve);
-                    response.pipe(concat(function(data) {
-                        var body = data.toString('utf8');
-                        log.debug({
-                            req: req,
-                            body: body,
-                        });
-                        body = replaceBodyRegistry(body);
-                        headers = _.assign({}, headers, {
-                            'content-length': Buffer.byteLength(body)
-                        });
-                        log.debug({
-                            req: req,
-                            headers: headers,
-                            replacedBody: body,
-                        });
-                        res.writeHead(response.statusCode, headers);
-                        res.end(body);
-                        dbCacheJson.put(req.url, {
-                            statusCode: response.statusCode,
-                            headers: headers,
-                            body: body,
-                            etag: headers.etag,
-                        });
-                        schedule.run('update', {
-                            url: req.url,
-                            etag: headers.etag,
-                        }, Date.now() + 60000);
-                    }));
-                } else {
-                    log.debug({
-                        unknownContentType: true,
-                        response: response
-                    });
-                    res.writeHead(response.statusCode, headers);
-                    response.pipe(res);
-                }
-                return true;
-            }
-        })(req, res, reject);
+        res._proxyRigestry = registry;
+        res._proxyResolve = resolve;
+        proxy2[registry](req, res, reject);
     });
-};
-proxy(config.registry.public, {});
+});
 
 var server = http.createServer();
 server.on('request', function(req, res) {
-    req.url = req.url.replace(/\/+/g, '/');
+    req.url = req.url.replace(/\/+/g, '/').replace(/\?.*$/g, '');
     res.status = function(code) {
         res.statusCode = code;
     };
@@ -197,27 +248,10 @@ server.on('request', function(req, res) {
 
     mount(req, res, function() {
         co(function * () {
-            if (req.method !== 'GET') return proxyPublic(req, res);
-            if (req.url.match(/^\/[^\/]+(\?.*)?$/)) {
-                var cache = yield dbCacheJson.getAsync(req.url).catch(function(err) {
-                    return false;
-                })
-                if (cache) {
-                    log.debug({
-                        req: req,
-                        cachedObject: cache
-                    });
-                    if ('if-none-match' in req.headers && req.headers['if-none-match'] === cache.etag) {
-                        cache.headers['content-length'] = 0;
-                        res.writeHead(304, cache.headers);
-                        res.end();
-                    }
-                    res.writeHead(cache.statusCode, cache.headers);
-                    res.end(cache.body);
-                    return;
-                }
-            }
-            return proxyPublic(req, res);
+            if (req.url.match(/^\/-\/|@/) || req.method !== 'GET') return proxy('private', req, res);
+            if (req.url.match(/^\/[^@\/]+$/)) return proxy('public', req, res);
+            if (req.url.match(/^\/[^\/]+$/)) return proxy('private', req, res);
+            return proxy('public', req, res);
         })
             .catch(function(err) {
                 if (err) log.error(err);
