@@ -8,8 +8,8 @@ module.exports = {
         },
     },
     registry: {
-        public: 'http://registry.npmjs.org',
-        private: 'http://npmcc.creditcloud.com',
+        public: 'http://registry.npmjs.org', // no tailing slash
+        private: 'http://npmcc.creditcloud.com', // no tailing slash
     },
     tarballCacheDir: path.resolve(__dirname, '..', 'cache'),
     cachePublic: true,

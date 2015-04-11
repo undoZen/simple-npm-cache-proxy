@@ -6,18 +6,68 @@ var fs = require('fs');
 var _ = require('lodash');
 var config = require('config');
 var co = require('co');
-var request = require('request');
+var request = require('superagent');
 var mkdirp = require('mkdirp');
 var concat = require('concat-stream');
-var db = require('level')(config.db.path, _.assign({}, config.db.config, {
+var db = require('level-sublevel')(require('level')(config.db.path, _.assign({}, config.db.config, {
     valueEncoding: 'json'
-}));
+})));
+var dbCache = db.sublevel('cache');
+var dbCacheJson = dbCache.sublevel('json');
 require('bunyan-hub-logger/replaceDebug')('simple-npm-cache-proxy');
 var log = require('bunyan-hub-logger')({
     app: 'simple-npm-cache-proxy',
     name: 'server',
 });
-Promise.promisifyAll(db);
+var Schedule = require('level-schedule');
+var dbSchedule = db.sublevel('schedule');
+
+promisifyEachAll([db, dbCache, dbCacheJson, dbSchedule]);
+
+function promisifyEachAll(arr) {
+    arr.forEach(Promise.promisifyAll);
+}
+
+var schedule = Schedule(dbSchedule);
+schedule.job('update', function(payload, done) {
+    log.trace({
+        job: 'update',
+        payload: payload,
+    });
+    request.get(config.registry.public + payload.url)
+        .set('if-none-match', payload.etag)
+        .end(co.wrap(function * (err, r) {
+            log.trace({
+                job: 'update',
+                payload: payload,
+                err: err,
+                result: r,
+            });
+            if (err || r.statusCode !== 200) {
+                schedule.run('update', payload, Date.now() + 60000);
+                done();
+                return;
+            }
+            if (r.text && r.headers.etag) {
+                var cacheObject = {
+                    statusCode: r.statusCode,
+                    headers: pickTarballHeaders(r.headers),
+                    etag: r.headers.etag,
+                    body: r.text,
+                };
+                log.info({
+                    updated: true,
+                    cacheObject: cacheObject,
+                });
+                yield dbCacheJson.putAsync(payload.url, cacheObject);
+            }
+            schedule.run('update', {
+                url: payload.url,
+                etag: r.headers.etag,
+            }, Date.now() + 60000);
+            done();
+        }));
+});
 var st = require('st');
 var mount = st({
     path: config.tarballCacheDir,
@@ -39,7 +89,14 @@ var mount = st({
     },
     index: false, // return 404's for directories 
     passthrough: true, // calls next/returns instead of returning a 404 error 
-})
+});
+
+function pickTarballHeaders(headers) {
+    return _.pick(headers, [
+        'content-type',
+        'content-length',
+    ]);
+}
 
 var proxy = require('simple-http-proxy');
 var proxyPrivate = proxy(config.registry.private);
@@ -62,13 +119,7 @@ var proxyPublic = function(req, res) {
                     mkdirp.sync(path.dirname(filePath));
                     var fileStream = fs.createWriteStream(filePath);
                     response.pipe(fileStream);
-                    res.writeHead(response.statusCode, _.pick(headers, [
-                        'content-type',
-                        'content-length',
-                        'date',
-                        'connection',
-                        'server',
-                    ]));
+                    res.writeHead(response.statusCode, pickTarballHeaders(headers));
                     response.on('data', res.write.bind(res));
                     response.on('end', res.end.bind(res));
                 } else if (typeof headers['content-type'] === 'string' &&
@@ -91,12 +142,16 @@ var proxyPublic = function(req, res) {
                         });
                         res.writeHead(response.statusCode, headers);
                         res.end(result);
-                        db.put('cache|json|' + req.url, {
+                        dbCacheJson.put(req.url, {
                             statusCode: response.statusCode,
                             headers: headers,
                             body: result,
                             etag: headers.etag,
                         });
+                        schedule.run('update', {
+                            url: req.url,
+                            etag: headers.etag,
+                        }, Date.now() + 60000);
                     }));
                 } else {
                     log.debug({
@@ -130,10 +185,13 @@ server.on('request', function(req, res) {
         co(function * () {
             if (req.method !== 'GET') return proxyPublic(req, res);
             if (req.url.match(/^\/[^\/]+(\?.*)?$/)) {
-                var cache = yield db.getAsync('cache|json|' + req.url).catch(function(err) {
+                var cache = yield dbCacheJson.getAsync(req.url).catch(function(err) {
                     return false;
                 })
                 if (cache) {
+                    log.warn({
+                        cachedObject: cache
+                    });
                     res.writeHead(cache.statusCode, cache.headers);
                     res.end(cache.body);
                     return;
@@ -142,6 +200,7 @@ server.on('request', function(req, res) {
             return proxyPublic(req, res);
         })
             .catch(function(err) {
+                if (err) log.error(err);
                 if (err && !res.headersSent) {
                     res.status(500);
                     log.error(err);
