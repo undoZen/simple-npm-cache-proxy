@@ -1,6 +1,7 @@
 'use strict';
 global.Promise = require('bluebird');
 var http = require('http');
+http.globalAgent.maxSockets = 20;
 var path = require('path');
 var fs = require('fs');
 var _ = require('lodash');
@@ -28,6 +29,10 @@ function promisifyEachAll(arr) {
     arr.forEach(Promise.promisifyAll);
 }
 
+function replaceBodyRegistry(body) {
+    return body.replace(config.replaceHost[0], config.replaceHost[1]);
+}
+
 var schedule = Schedule(dbSchedule);
 schedule.job('update', function(payload, done) {
     log.trace({
@@ -41,19 +46,23 @@ schedule.job('update', function(payload, done) {
                 job: 'update',
                 payload: payload,
                 err: err,
-                result: r,
+                response: r,
             });
-            if (err || r.statusCode !== 200) {
+            if (err || r.statusCode !== 200 || !r.headers.etag) {
                 schedule.run('update', payload, Date.now() + 60000);
                 done();
                 return;
             }
-            if (r.text && r.headers.etag) {
+            var headers = r.headers;
+            if (r.text && headers.etag && headers.etag !== payload.etag) {
+                var body = replaceBodyRegistry(r.text);
                 var cacheObject = {
                     statusCode: r.statusCode,
-                    headers: pickTarballHeaders(r.headers),
+                    headers: _.assign({}, pickTarballHeaders(r.headers), {
+                        'content-length': Buffer.byteLength(body)
+                    }),
                     etag: r.headers.etag,
-                    body: r.text,
+                    body: body,
                 };
                 log.info({
                     updated: true,
@@ -93,6 +102,7 @@ var mount = st({
 
 function pickTarballHeaders(headers) {
     return _.pick(headers, [
+        'etag',
         'content-type',
         'content-length',
     ]);
@@ -126,26 +136,26 @@ var proxyPublic = function(req, res) {
                     headers['content-type'].match(/^application\/json/i)) {
                     res.on('finish', resolve);
                     response.pipe(concat(function(data) {
-                        var result = data.toString('utf8');
+                        var body = data.toString('utf8');
                         log.debug({
                             req: req,
-                            result: result,
+                            body: body,
                         });
-                        result = result.replace(config.replaceHost[0], config.replaceHost[1]);
+                        body = replaceBodyRegistry(body);
                         headers = _.assign({}, headers, {
-                            'content-length': Buffer.byteLength(result)
+                            'content-length': Buffer.byteLength(body)
                         });
                         log.debug({
                             req: req,
                             headers: headers,
-                            replacedResult: result,
+                            replacedBody: body,
                         });
                         res.writeHead(response.statusCode, headers);
-                        res.end(result);
+                        res.end(body);
                         dbCacheJson.put(req.url, {
                             statusCode: response.statusCode,
                             headers: headers,
-                            body: result,
+                            body: body,
                             etag: headers.etag,
                         });
                         schedule.run('update', {
@@ -189,9 +199,15 @@ server.on('request', function(req, res) {
                     return false;
                 })
                 if (cache) {
-                    log.warn({
+                    log.debug({
+                        req: req,
                         cachedObject: cache
                     });
+                    if ('if-none-match' in req.headers && req.headers['if-none-match'] === cache.etag) {
+                        cache.headers['content-length'] = 0;
+                        res.writeHead(304, cache.headers);
+                        res.end();
+                    }
                     res.writeHead(cache.statusCode, cache.headers);
                     res.end(cache.body);
                     return;
