@@ -10,13 +10,15 @@ module.exports = {
     registry: {
         public: 'http://registry.npmjs.org', // no tailing slash
         private: 'http://npmcc.creditcloud.com', // no tailing slash
+        taobao: 'http://registry.npm.taobao.org', // no tailing slash
     },
     cache: {
         public: true,
         private: true,
+        taobao: true,
     },
     tarballCacheDir: path.resolve(__dirname, '..', 'cache'),
-    replaceHost: [/http:\/\/registry\.npmjs\.org/g, 'http://218.241.199.27:7007'],
+    replaceHost: [/http:\/\/registry\.npmjs\.org/g, 'http://localhost:7007'],
     server: {
         port: 7007,
     },

@@ -21,7 +21,7 @@ var log = logger({
     app: 'simple-npm-cache-proxy',
     name: 'server',
     serializers: {
-        //response: logger.stdSerializers.res
+        response: logger.stdSerializers.res
     },
 });
 var Schedule = require('level-schedule');
@@ -134,7 +134,7 @@ function onresponse(response, res) {
     res.on('finish', res._proxyResolve);
     var headers = response.headers;
     // cache tarball
-    if (config.cache[res._proxyRigestry] && req.method === 'GET' &&
+    if (config.cache[res._proxyRigestry] && req.method === 'GET' && !headers.location &&
         headers['content-type'] === 'application/octet-stream') {
         var filePath = path.resolve(config.tarballCacheDir, req.url.replace(/^\/+/, ''));
         mkdirp.sync(path.dirname(filePath));
@@ -188,16 +188,13 @@ function onresponse(response, res) {
 }
 
 var simpleHttpProxy = require('simple-http-proxy');
-var proxy2 = {
-    public: simpleHttpProxy(config.registry.public, {
+var proxy2 = {};
+Object.keys(config.registry).forEach(function(registry) {
+    proxy2[registry] = simpleHttpProxy(config.registry[registry], {
         timeout: false,
         onresponse: onresponse,
-    }),
-    private: simpleHttpProxy(config.registry.private, {
-        timeout: false,
-        onresponse: onresponse,
-    }),
-};
+    });
+});
 
 var proxy = co.wrap(function * (registry, req, res) {
     if (req.method === 'GET') {
@@ -248,6 +245,7 @@ server.on('request', function(req, res) {
 
     mount(req, res, function() {
         co(function * () {
+            if (req.url.match(/^\/[^\/]+\/download\/.*\.tgz$/)) return proxy('taobao', req, res);
             if (req.url.match(/^\/-\/|@/) || req.method !== 'GET') return proxy('private', req, res);
             if (req.url.match(/^\/[^@\/]+$/)) return proxy('public', req, res);
             if (req.url.match(/^\/[^\/]+$/)) return proxy('private', req, res);
