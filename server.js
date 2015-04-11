@@ -10,7 +10,7 @@ var co = require('co');
 var request = require('superagent');
 var mkdirp = require('mkdirp');
 var concat = require('concat-stream');
-var db = require('level-sublevel')(require('level')(config.db.path, xtend(config.db.config, {
+var db = require('level-sublevel')(require('levelup')(config.db.path, xtend(config.db.config, {
     valueEncoding: 'json'
 })));
 var dbCache = db.sublevel('cache');
