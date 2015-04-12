@@ -57,7 +57,16 @@ schedule.job('update', function(payload, done) {
         job: 'update',
         payload: payload,
     });
-    superagent.get(config.registry[payload.registry] + payload.url)
+    var registryUrl, registryHost;
+    if (Array.isArray(config.registry[payload.registry])) {
+        registryUrl = config.registry[payload.registry][0];
+        registryHost = config.registry[payload.registry][1];
+    } else {
+        registryUrl = config.registry[payload.registry];
+        registryHost = url.parse(config.registry[payload.registry]).host;
+    }
+    superagent.get(registryUrl + payload.url)
+        .set('host', registryHost)
         .set('if-none-match', payload.etag)
         .end(co.wrap(function * (err, r) {
             log.trace({
@@ -158,10 +167,18 @@ var proxy = co.wrap(function * (registry, req, res) {
     if ('accept-encoding' in req.headers) { // remove gzip, get raw text body
         req.headers['accept-encoding'] = 'identity';
     }
-    req.headers.host = url.parse(config.registry[registry]).host;
+    var registryUrl, registryHost;
+    if (Array.isArray(config.registry[registry])) {
+        registryUrl = config.registry[registry][0];
+        registryHost = config.registry[registry][1];
+    } else {
+        registryUrl = config.registry[registry];
+        registryHost = url.parse(config.registry[registry]).host;
+    }
+    req.headers.host = registryHost;
 
     var rp = new Promise(function(resolve, reject) {
-        var request = superagent(req.method, config.registry[registry] + req.url)
+        var request = superagent(req.method, registryUrl + req.url)
             .redirects(1)
             .set(req.headers);
         request._callback = function(err) {
