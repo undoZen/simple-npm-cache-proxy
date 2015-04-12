@@ -2,12 +2,13 @@
 global.Promise = require('bluebird');
 var http = require('http');
 http.globalAgent.maxSockets = 5000;
+var url = require('url');
 var path = require('path');
 var fs = require('fs');
 var _ = require('lodash');
 var config = require('config');
 var co = require('co');
-var request = require('superagent');
+var superagent = require('superagent');
 var mkdirp = require('mkdirp');
 var concat = require('concat-stream');
 var db = require('level-sublevel')(require('levelup')(config.db.path, xtend(config.db.config, {
@@ -56,7 +57,7 @@ schedule.job('update', function(payload, done) {
         job: 'update',
         payload: payload,
     });
-    request.get(config.registry[payload.registry] + payload.url)
+    superagent.get(config.registry[payload.registry] + payload.url)
         .set('if-none-match', payload.etag)
         .end(co.wrap(function * (err, r) {
             log.trace({
@@ -75,7 +76,7 @@ schedule.job('update', function(payload, done) {
                 var body = replaceBodyRegistry(r.text);
                 var cacheObject = {
                     statusCode: r.statusCode,
-                    headers: xtend(pickTarballHeaders(r.headers), {
+                    headers: xtend(pickHeaders(r.headers), {
                         'content-length': Buffer.byteLength(body)
                     }),
                     etag: r.headers.etag,
@@ -116,85 +117,13 @@ var mount = st({
     passthrough: true, // calls next/returns instead of returning a 404 error 
 });
 
-function pickTarballHeaders(headers) {
+function pickHeaders(headers) {
     return _.pick(headers, [
         'etag',
         'content-type',
         'content-length',
     ]);
 }
-
-function onresponse(response, res) {
-    var req = res.req;
-    log.debug({
-        response: response,
-        req: req,
-        res: res,
-    });
-    res.on('finish', res._proxyResolve);
-    var headers = response.headers;
-    // cache tarball
-    if (config.cache[res._proxyRigestry] && req.method === 'GET' && !headers.location &&
-        headers['content-type'] === 'application/octet-stream') {
-        var filePath = path.resolve(config.tarballCacheDir, req.url.replace(/^\/+/, ''));
-        mkdirp.sync(path.dirname(filePath));
-        var fileStream = fs.createWriteStream(filePath);
-        response.pipe(fileStream);
-        res.writeHead(response.statusCode, pickTarballHeaders(headers));
-        response.on('data', res.write.bind(res));
-        response.on('end', res.end.bind(res));
-    }
-    // cache json
-    else if (config.cache[res._proxyRigestry] && req.method === 'GET' &&
-        typeof headers['etag'] === 'string' &&
-        (headers['content-type'] || '').match(/^application\/json/i)) {
-        response.pipe(concat(function(data) {
-            var body = data.toString('utf8');
-            log.debug({
-                req: req,
-                body: body,
-            });
-            body = replaceBodyRegistry(body);
-            headers = xtend(headers, {
-                'content-length': Buffer.byteLength(body)
-            });
-            log.debug({
-                req: req,
-                headers: headers,
-                replacedBody: body,
-            });
-            res.writeHead(response.statusCode, headers);
-            res.end(body);
-            dbCacheJson.put(req.url, {
-                statusCode: response.statusCode,
-                headers: headers,
-                body: body,
-                etag: headers.etag,
-            });
-            schedule.run('update', {
-                registry: res._proxyRigestry,
-                url: req.url,
-                etag: headers.etag,
-            }, Date.now() + 60000);
-        }));
-    } else {
-        log.debug({
-            proxyDirectly: true,
-            response: response
-        });
-        return false;
-    }
-    return true;
-}
-
-var simpleHttpProxy = require('simple-http-proxy');
-var proxy2 = {};
-Object.keys(config.registry).forEach(function(registry) {
-    proxy2[registry] = simpleHttpProxy(config.registry[registry], {
-        timeout: false,
-        onresponse: onresponse,
-    });
-});
 
 var proxy = co.wrap(function * (registry, req, res) {
     if (req.method === 'GET') {
@@ -220,13 +149,66 @@ var proxy = co.wrap(function * (registry, req, res) {
         delete req.headers['if-none-match'];
     }
     if ('accept-encoding' in req.headers) { // remove gzip, get raw text body
-        delete req.headers['accept-encoding'];
+        req.headers['accept-encoding'] = 'identity';
     }
+    req.headers.host = url.parse(config.registry[registry]).host;
 
     return new Promise(function(resolve, reject) {
-        res._proxyRigestry = registry;
-        res._proxyResolve = resolve;
-        proxy2[registry](req, res, reject);
+        var request = superagent(req.method, config.registry[registry] + req.url)
+            .redirects(1)
+            .set(req.headers);
+        request._callback = function(err) {
+            if (err) reject(err);
+        };
+        request.pipe(concat(function(body) {
+            res.on('close', resolve);
+            res.on('finish', resolve);
+            var response = request.res;
+            var headers = response.headers;
+            // cache tarball
+            if (config.cache[registry] && req.method === 'GET' && !headers.location &&
+                headers['content-type'] === 'application/octet-stream') {
+                var filePath = path.resolve(config.tarballCacheDir, req.url.replace(/^\/+/, ''));
+                mkdirp(path.dirname(filePath), function(err) {
+                    if (err) log.error(err);
+                    fs.writeFile(filePath, body, function(err) {
+                        if (err) log.error(err);
+                    });
+                });
+            }
+            // cache json
+            else if ((headers['content-type'] || '').match(/^application\/json/i)) {
+                body = body.toString('utf8');
+                log.debug({
+                    req: req,
+                    body: body,
+                });
+                body = replaceBodyRegistry(body);
+                log.debug({
+                    req: req,
+                    headers: headers,
+                    replacedBody: body,
+                });
+                headers = xtend(headers, {
+                    'content-length': Buffer.byteLength(body)
+                });
+                if (config.cache[registry] && req.method === 'GET' && typeof headers['etag'] === 'string') {
+                    dbCacheJson.put(req.url, {
+                        statusCode: response.statusCode,
+                        headers: headers,
+                        body: body,
+                        etag: headers.etag,
+                    });
+                    schedule.run('update', {
+                        registry: registry,
+                        url: req.url,
+                        etag: headers.etag,
+                    }, Date.now() + 60000);
+                }
+            }
+            res.writeHead(response.statusCode, pickHeaders(headers));
+            res.end(body);
+        }));
     });
 });
 
