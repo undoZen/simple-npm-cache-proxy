@@ -125,7 +125,9 @@ function pickHeaders(headers) {
     ]);
 }
 
+var cachedRequest = {};
 var proxy = co.wrap(function * (registry, req, res) {
+    var crkey = registry + '|' + req.url;
     if (req.method === 'GET') {
         var cache = yield dbCacheJson.getAsync(req.url).catch(function(err) {
             return false;
@@ -137,12 +139,17 @@ var proxy = co.wrap(function * (registry, req, res) {
             });
             if ('if-none-match' in req.headers && req.headers['if-none-match'] === cache.etag) {
                 cache.headers['content-length'] = 0;
-                res.writeHead(304, cache.headers);
-                res.end();
+                return {
+                    statusCode: 304,
+                    headers: cache.headers,
+                    body: new Buffer(0),
+                };
             }
-            res.writeHead(cache.statusCode, cache.headers);
-            res.end(cache.body);
-            return;
+            return cache;
+        }
+        var cr;
+        if ((cr = cachedRequest[crkey])) {
+            return cr;
         }
     }
     if ('if-none-match' in req.headers) { // make sure upstream return 200 instead of 304
@@ -153,7 +160,7 @@ var proxy = co.wrap(function * (registry, req, res) {
     }
     req.headers.host = url.parse(config.registry[registry]).host;
 
-    return new Promise(function(resolve, reject) {
+    var rp = new Promise(function(resolve, reject) {
         var request = superagent(req.method, config.registry[registry] + req.url)
             .redirects(1)
             .set(req.headers);
@@ -161,8 +168,6 @@ var proxy = co.wrap(function * (registry, req, res) {
             if (err) reject(err);
         };
         request.pipe(concat(function(body) {
-            res.on('close', resolve);
-            res.on('finish', resolve);
             var response = request.res;
             var headers = response.headers;
             // cache tarball
@@ -206,10 +211,20 @@ var proxy = co.wrap(function * (registry, req, res) {
                     }, Date.now() + 60000);
                 }
             }
-            res.writeHead(response.statusCode, pickHeaders(headers));
-            res.end(body);
+            resolve({
+                statusCode: response.statusCode,
+                headers: pickHeaders(headers),
+                body: body,
+            });
         }));
     });
+    if (req.method === 'GET') {
+        cachedRequest[crkey] = rp;
+        rp.finally(function() {
+            delete cachedRequest[crkey];
+        });
+    }
+    return rp;
 });
 
 var server = http.createServer();
@@ -233,6 +248,10 @@ server.on('request', function(req, res) {
             if (req.url.match(/^\/[^\/]+$/)) return proxy('private', req, res);
             return proxy('public', req, res);
         })
+            .then(function(cache) {
+                res.writeHeader(cache.statusCode, cache.headers);
+                res.end(cache.body);
+            })
             .catch(function(err) {
                 if (err) log.error(err);
                 if (err && !res.headersSent) {
