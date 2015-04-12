@@ -167,6 +167,9 @@ var proxy = co.wrap(function * (registry, req, res) {
         request._callback = function(err) {
             if (err) reject(err);
         };
+        if (['GET', 'HEAD'].indexOf(req.method) === -1) {
+            req.pipe(request);
+        }
         request.pipe(concat(function(body) {
             var response = request.res;
             var headers = response.headers;
