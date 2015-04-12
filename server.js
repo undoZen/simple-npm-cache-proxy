@@ -1,7 +1,7 @@
 'use strict';
 global.Promise = require('bluebird');
 var http = require('http');
-http.globalAgent.maxSockets = 5000;
+http.globalAgent.maxSockets = Infinity;
 var url = require('url');
 var path = require('path');
 var fs = require('fs');
@@ -76,7 +76,7 @@ schedule.job('update', function(payload, done) {
                 response: r,
             });
             if (err || r.statusCode !== 200 || !r.headers.etag) {
-                schedule.run('update', payload, Date.now() + 60000);
+                schedule.run('update', payload, Date.now() + 10 * 60 * 1000);
                 done();
                 return;
             }
@@ -99,7 +99,7 @@ schedule.job('update', function(payload, done) {
             }
             schedule.run('update', xtend(payload, {
                 etag: r.headers.etag,
-            }), Date.now() + 60000);
+            }), Date.now() + 10 * 60 * 1000);
             done();
         }));
 });
@@ -228,7 +228,7 @@ var proxy = co.wrap(function * (registry, req, res) {
                         registry: registry,
                         url: req.url,
                         etag: headers.etag,
-                    }, Date.now() + 60000);
+                    }, Date.now() + 10 * 60 * 1000);
                 }
             }
             resolve({
