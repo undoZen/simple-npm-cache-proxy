@@ -1,5 +1,7 @@
 'use strict';
 global.Promise = require('bluebird');
+var logger = require('bunyan-hub-logger');
+logger.replaceDebug('simple-npm-cache-proxy');
 var http = require('http');
 http.globalAgent.maxSockets = Infinity;
 var url = require('url');
@@ -17,8 +19,6 @@ var db = require('level-sublevel')(require('levelup')(config.db.path, xtend(conf
 })));
 var dbCache = db.sublevel('cache');
 var dbCacheJson = dbCache.sublevel('json');
-var logger = require('bunyan-hub-logger');
-logger.replaceDebug('simple-npm-cache-proxy');
 var log = logger({
     app: 'simple-npm-cache-proxy',
     name: 'server',
@@ -77,7 +77,7 @@ schedule.job('update', function(payload, done) {
                 response: r,
             });
             if (err || r.statusCode !== 200 || !r.headers.etag) {
-                schedule.run('update', payload, Date.now() + 10 * 60 * 1000);
+                schedule.run('update', payload, Date.now() + 8 * 60 * 1000 + Math.random() * 4);
                 done();
                 return;
             }
@@ -100,7 +100,7 @@ schedule.job('update', function(payload, done) {
             }
             schedule.run('update', xtend(payload, {
                 etag: r.headers.etag,
-            }), Date.now() + 10 * 60 * 1000);
+            }), Date.now() + 8 * 60 * 1000 + Math.random() * 4);
             done();
         }));
 });
@@ -221,7 +221,7 @@ var proxy = co.wrap(function * (registry, req, res) {
                         registry: registry,
                         url: req.url,
                         etag: headers.etag,
-                    }, Date.now() + 10 * 60 * 1000);
+                    }, Date.now() + 8 * 60 * 1000 + Math.random() * 4);
                 }
             }
             resolve({
@@ -233,6 +233,9 @@ var proxy = co.wrap(function * (registry, req, res) {
         if (['GET', 'HEAD'].indexOf(req.method) === -1) {
             shp(registryUrl, {
                 timeout: false,
+                onrequest: function(options, req) {
+                    options.headers.host = registryHost;
+                },
                 onresponse: function(_response, res) {
                     response = _response;
                     response.pipe(concatStream);
@@ -245,7 +248,7 @@ var proxy = co.wrap(function * (registry, req, res) {
                 .set(req.headers);
             request.pipe(concatStream);
             request._callback = function(err) {
-                if (err) reject(err);
+                if (err) return reject(err);
             };
         }
     });
