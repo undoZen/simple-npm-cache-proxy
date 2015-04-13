@@ -11,6 +11,7 @@ var co = require('co');
 var superagent = require('superagent');
 var mkdirp = require('mkdirp');
 var concat = require('concat-stream');
+var shp = require('simple-http-proxy');
 var db = require('level-sublevel')(require('levelup')(config.db.path, xtend(config.db.config, {
     valueEncoding: 'json'
 })));
@@ -178,11 +179,8 @@ var proxy = co.wrap(function * (registry, req, res) {
     req.headers.host = registryHost;
 
     var rp = new Promise(function(resolve, reject) {
-        var request = superagent(req.method, registryUrl + req.url)
-            .redirects(1)
-            .set(req.headers);
+        var response;
         var concatStream = concat(function(body) {
-            var response = request.res;
             var headers = response.headers;
             // cache tarball
             if (config.cache[registry] && req.method === 'GET' && !headers.location &&
@@ -232,12 +230,23 @@ var proxy = co.wrap(function * (registry, req, res) {
             });
         });
         if (['GET', 'HEAD'].indexOf(req.method) === -1) {
-            req.pipe(request);
+            shp(registryUrl, {
+                timeout: false,
+                onresponse: function(_response, res) {
+                    response = _response;
+                    response.pipe(concatStream);
+                    return true;
+                },
+            })(req, res, reject);
         } else {
+            var request = superagent(req.method, registryUrl + req.url)
+                .redirects(1)
+                .set(req.headers);
             request.pipe(concatStream);
             request._callback = function(err) {
                 if (err) reject(err);
             };
+            response = request.res;
         }
     });
     if (req.method === 'GET') {
