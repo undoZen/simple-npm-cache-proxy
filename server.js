@@ -181,13 +181,7 @@ var proxy = co.wrap(function * (registry, req, res) {
         var request = superagent(req.method, registryUrl + req.url)
             .redirects(1)
             .set(req.headers);
-        request._callback = function(err) {
-            if (err) reject(err);
-        };
-        if (['GET', 'HEAD'].indexOf(req.method) === -1) {
-            req.pipe(request);
-        }
-        request.pipe(concat(function(body) {
+        var concatStream = concat(function(body) {
             var response = request.res;
             var headers = response.headers;
             // cache tarball
@@ -236,7 +230,15 @@ var proxy = co.wrap(function * (registry, req, res) {
                 headers: pickHeaders(headers),
                 body: body,
             });
-        }));
+        });
+        if (['GET', 'HEAD'].indexOf(req.method) === -1) {
+            req.pipe(request);
+        } else {
+            request.pipe(concatStream);
+            request._callback = function(err) {
+                if (err) reject(err);
+            };
+        }
     });
     if (req.method === 'GET') {
         cachedRequest[crkey] = rp;
@@ -247,6 +249,13 @@ var proxy = co.wrap(function * (registry, req, res) {
     return rp;
 });
 
+function routeProxy(req, res) {
+    if (req.url.match(/^\/[^\/]+\/download\/.*\.tgz$/)) return proxy('taobao', req, res);
+    if (req.url.match(/^\/-\/|@/) || req.method !== 'GET') return proxy('private', req, res);
+    if (req.url.match(/^\/[^@\/]+$/)) return proxy('public', req, res);
+    if (req.url.match(/^\/[^\/]+$/)) return proxy('private', req, res);
+    return proxy('public', req, res);
+}
 var server = http.createServer();
 server.on('request', function(req, res) {
     req.url = req.url.replace(/\/+/g, '/').replace(/\?.*$/g, '');
@@ -259,27 +268,26 @@ server.on('request', function(req, res) {
         req: req,
         res: res
     });
-
-    mount(req, res, function() {
-        co(function * () {
-            if (req.url.match(/^\/[^\/]+\/download\/.*\.tgz$/)) return proxy('taobao', req, res);
-            if (req.url.match(/^\/-\/|@/) || req.method !== 'GET') return proxy('private', req, res);
-            if (req.url.match(/^\/[^@\/]+$/)) return proxy('public', req, res);
-            if (req.url.match(/^\/[^\/]+$/)) return proxy('private', req, res);
-            return proxy('public', req, res);
-        })
-            .then(function(cache) {
-                res.writeHeader(cache.statusCode, cache.headers);
-                res.end(cache.body);
-            })
-            .catch(function(err) {
-                if (err) log.error(err);
-                if (err && !res.headersSent) {
-                    res.status(500);
-                    log.error(err);
-                    res.end('500 internal error.');
-                }
+    ((['GET', 'HEAD'].indexOf(req.method) === -1) ?
+        routeProxy(req, res) :
+        new Promise(function(resolve, reject) {
+            req.on('close', resolve);
+            req.on('finish', resolve);
+            mount(req, res, function() {
+                resolve(routeProxy(req, res));
             });
+        })
+    ).then(function(cache) {
+        res.writeHeader(cache.statusCode, cache.headers);
+        res.end(cache.body);
+    }).catch(function(err) {
+        console.log(err);
+        if (err) log.error(err);
+        if (err && !res.headersSent) {
+            res.status(500);
+            log.error(err);
+            res.end('500 internal error.');
+        }
     });
 });
 
