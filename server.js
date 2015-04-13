@@ -138,7 +138,7 @@ function pickHeaders(headers) {
 var cachedRequest = {};
 var proxy = co.wrap(function * (registry, req, res) {
     var crkey = registry + '|' + req.url;
-    if (config.cache[registry] && req.method === 'GET' && !req.match(/^\/-\//)) {
+    if (config.cache[registry] && req.method === 'GET' && !req.url.match(/^\/-\//)) {
         var cache = yield dbCacheJson.getAsync(req.url).catch(function(err) {
             return false;
         })
@@ -209,7 +209,7 @@ var proxy = co.wrap(function * (registry, req, res) {
                 headers = xtend(headers, {
                     'content-length': Buffer.byteLength(body)
                 });
-                if (config.cache[registry] && req.method === 'GET' && !req.match(/^\/-\//) && typeof headers['etag'] === 'string') {
+                if (config.cache[registry] && req.method === 'GET' && !req.url.match(/^\/-\//) && typeof headers['etag'] === 'string') {
                     dbCacheJson.put(req.url, {
                         statusCode: response.statusCode,
                         headers: headers,
