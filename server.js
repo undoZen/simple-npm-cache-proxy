@@ -179,8 +179,9 @@ var proxy = co.wrap(function * (registry, req, res) {
     req.headers.host = registryHost;
 
     var rp = new Promise(function(resolve, reject) {
-        var response;
+        var request, response;
         var concatStream = concat(function(body) {
+            if (!response && request) response = request.res;
             var headers = response.headers;
             // cache tarball
             if (config.cache[registry] && req.method === 'GET' && !headers.location &&
@@ -239,14 +240,13 @@ var proxy = co.wrap(function * (registry, req, res) {
                 },
             })(req, res, reject);
         } else {
-            var request = superagent(req.method, registryUrl + req.url)
+            request = superagent(req.method, registryUrl + req.url)
                 .redirects(1)
                 .set(req.headers);
             request.pipe(concatStream);
             request._callback = function(err) {
                 if (err) reject(err);
             };
-            response = request.res;
         }
     });
     if (req.method === 'GET') {
