@@ -280,6 +280,13 @@ server.on('request', function(req, res) {
         req: req,
         res: res
     });
+    if (req.url.match(/\/__flush__\//)) {
+        var flushUrl = req.url.substring('/__flush__'.length);
+        return co(function * () {
+            yield dbCacheJson.delAsync(flushUrl);
+            res.end('done');
+        }).catch(resError);
+    }
     ((['GET', 'HEAD'].indexOf(req.method) === -1) ?
         routeProxy(req, res) :
         new Promise(function(resolve, reject) {
@@ -292,7 +299,9 @@ server.on('request', function(req, res) {
     ).then(function(cache) {
         res.writeHeader(cache.statusCode, cache.headers);
         res.end(cache.body);
-    }).catch(function(err) {
+    }).catch(resError);
+
+    function resError(err) {
         console.log(err);
         if (err) log.error(err);
         if (err && !res.headersSent) {
@@ -300,7 +309,7 @@ server.on('request', function(req, res) {
             log.error(err);
             res.end('500 internal error.');
         }
-    });
+    }
 });
 
 server.listen(config.server.port);
