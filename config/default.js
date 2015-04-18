@@ -9,7 +9,7 @@ module.exports = {
     },
     registry: {
         public: 'http://registry.npmjs.org', // no tailing slash
-        private: 'http://npmcc.creditcloud.com', // no tailing slash
+        private: 'http://npm.example.com', // no tailing slash
         taobao: 'http://registry.npm.taobao.org', // no tailing slash
     },
     cache: {
