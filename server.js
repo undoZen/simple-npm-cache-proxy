@@ -84,19 +84,25 @@ schedule.job('update', function(payload, done) {
             var headers = r.headers;
             if (r.text && headers.etag && headers.etag !== payload.etag) {
                 var body = replaceBodyRegistry(r.text);
-                var cacheObject = {
-                    statusCode: r.statusCode,
-                    headers: xtend(pickHeaders(r.headers), {
-                        'content-length': Buffer.byteLength(body)
-                    }),
-                    etag: r.headers.etag,
-                    body: body,
-                };
-                log.info({
-                    updated: true,
-                    cacheObject: cacheObject,
-                });
-                yield dbCacheJson.putAsync(payload.url, cacheObject);
+                try {
+                    body = JSON.stringify(JSON.parse(body));
+                } catch (e) {
+                    if (!e) {
+                        var cacheObject = {
+                            statusCode: r.statusCode,
+                            headers: xtend(pickHeaders(r.headers), {
+                                'content-length': Buffer.byteLength(body)
+                            }),
+                            etag: r.headers.etag,
+                            body: body,
+                        };
+                        log.info({
+                            updated: true,
+                            cacheObject: cacheObject,
+                        });
+                        yield dbCacheJson.putAsync(payload.url, cacheObject);
+                    }
+                }
             }
             schedule.run('update', xtend(payload, {
                 etag: r.headers.etag,
@@ -211,12 +217,18 @@ var proxy = co.wrap(function * (registry, req, res) {
                     'content-length': Buffer.byteLength(body)
                 });
                 if (config.cache[registry] && req.method === 'GET' && !req.url.match(/^\/-\//) && typeof headers['etag'] === 'string') {
-                    dbCacheJson.put(req.url, {
-                        statusCode: response.statusCode,
-                        headers: headers,
-                        body: body,
-                        etag: headers.etag,
-                    });
+                    try {
+                        body = JSON.stringify(JSON.parse(body));
+                    } catch (e) {
+                        if (!e) {
+                            dbCacheJson.put(req.url, {
+                                statusCode: response.statusCode,
+                                headers: headers,
+                                body: body,
+                                etag: headers.etag,
+                            });
+                        }
+                    }
                     schedule.run('update', {
                         registry: registry,
                         url: req.url,
