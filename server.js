@@ -85,7 +85,7 @@ schedule.job('update', function(payload, done) {
             if (r.text && headers.etag && headers.etag !== payload.etag) {
                 var body = replaceBodyRegistry(r.text);
                 try {
-                    body = JSON.stringify(JSON.parse(body));
+                    JSON.stringify(JSON.parse(body));
                 } catch (e) {
                     if (!e) {
                         var cacheObject = {
@@ -218,7 +218,7 @@ var proxy = co.wrap(function * (registry, req, res) {
                 });
                 if (config.cache[registry] && req.method === 'GET' && !req.url.match(/^\/-\//) && typeof headers['etag'] === 'string') {
                     try {
-                        body = JSON.stringify(JSON.parse(body));
+                        JSON.stringify(JSON.parse(body));
                     } catch (e) {
                         if (!e) {
                             dbCacheJson.put(req.url, {
