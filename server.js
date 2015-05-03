@@ -224,7 +224,9 @@ server.on('request', function(req, res) {
     if (req.url.match(/\/__flush__\//)) {
         var flushUrl = req.url.substring('/__flush__'.length);
         return co(function * () {
-            yield db.delAsync(flushUrl);
+            yield db.delAsync('cache||public||' + flushUrl);
+            yield db.delAsync('cache||private||' + flushUrl);
+            yield db.delAsync('cache||taobao||' + flushUrl);
             res.end('done');
         }).catch(resError);
     }
