@@ -1,5 +1,8 @@
 'use strict';
 global.Promise = require('bluebird');
+var Redis = require('redis');
+var config = require('config');
+Promise.promisifyAll(Redis);
 var logger = require('bunyan-hub-logger');
 logger.replaceDebug('simple-npm-cache-proxy');
 var http = require('http');
@@ -8,32 +11,20 @@ var url = require('url');
 var path = require('path');
 var fs = require('fs');
 var _ = require('lodash');
-var config = require('config');
 var co = require('co');
 var superagent = require('superagent');
 var mkdirp = require('mkdirp');
 var concat = require('concat-stream');
 var shp = require('simple-http-proxy');
-var db = require('level-sublevel')(require('levelup')(config.db.path, xtend(config.db.config, {
-    valueEncoding: 'json'
-})));
-var dbCache = db.sublevel('cache');
-var dbCacheJson = dbCache.sublevel('json');
+var db = Redis.createClient(config.redis || {});
+db.select(5);
 var log = logger({
     app: 'simple-npm-cache-proxy',
     name: 'server',
-    serializers: {
+    serializers: xtend(logger.stdSerializers, {
         response: logger.stdSerializers.res
-    },
+    }),
 });
-var Schedule = require('level-schedule');
-var dbSchedule = db.sublevel('schedule');
-
-promisifyEachAll([db, dbCache, dbCacheJson, dbSchedule]);
-
-function promisifyEachAll(arr) {
-    arr.forEach(Promise.promisifyAll);
-}
 
 function replaceBodyRegistry(body) {
     return body.replace(config.replaceHost[0], config.replaceHost[1]);
@@ -45,7 +36,6 @@ function xtend() {
     return _.assign.apply(_, args);
 }
 
-var schedule = Schedule(dbSchedule);
 /*
  * payload: {
  *   url,
@@ -53,63 +43,6 @@ var schedule = Schedule(dbSchedule);
  *   registry: public | private
  * }
  */
-schedule.job('update', function(payload, done) {
-    log.trace({
-        job: 'update',
-        payload: payload,
-    });
-    var registryUrl, registryHost;
-    if (Array.isArray(config.registry[payload.registry])) {
-        registryUrl = config.registry[payload.registry][0];
-        registryHost = config.registry[payload.registry][1];
-    } else {
-        registryUrl = config.registry[payload.registry];
-        registryHost = url.parse(config.registry[payload.registry]).host;
-    }
-    superagent.get(registryUrl + payload.url)
-        .set('host', registryHost)
-        .set('if-none-match', payload.etag)
-        .end(co.wrap(function * (err, r) {
-            log.trace({
-                job: 'update',
-                payload: payload,
-                err: err,
-                response: r,
-            });
-            if (err || r.statusCode !== 200 || !r.headers.etag) {
-                schedule.run('update', payload, Date.now() + 8 * 60 * 1000 + Math.random() * 4);
-                done();
-                return;
-            }
-            var headers = r.headers;
-            if (r.text && headers.etag && headers.etag !== payload.etag) {
-                var body = replaceBodyRegistry(r.text);
-                try {
-                    JSON.stringify(JSON.parse(body));
-                } catch (e) {
-                    if (!e) {
-                        var cacheObject = {
-                            statusCode: r.statusCode,
-                            headers: xtend(pickHeaders(r.headers), {
-                                'content-length': Buffer.byteLength(body)
-                            }),
-                            etag: r.headers.etag,
-                            body: body,
-                        };
-                        log.info({
-                            updated: true,
-                            cacheObject: cacheObject,
-                        });
-                        yield dbCacheJson.putAsync(payload.url, cacheObject);
-                    }
-                }
-            }
-            schedule.run('update', xtend(payload, {
-                etag: r.headers.etag,
-            }), Date.now() + 8 * 60 * 1000 + Math.random() * 4);
-            done();
-        }));
-});
 var st = require('st');
 var mount = st({
     path: config.tarballCacheDir,
@@ -145,10 +78,9 @@ var cachedRequest = {};
 var proxy = co.wrap(function * (registry, req, res) {
     var crkey = registry + '|' + req.url;
     if (config.cache[registry] && req.method === 'GET' && !req.url.match(/^\/-\//)) {
-        var cache = yield dbCacheJson.getAsync(req.url).catch(function(err) {
-            return false;
-        })
-        if (cache) {
+        var cachedJson = yield db.getAsync('cache||' + registry + '||' + req.url);
+        if (cachedJson) {
+            var cache = JSON.parse(cachedJson);
             log.debug({
                 req: req,
                 cachedObject: cache
@@ -217,23 +149,20 @@ var proxy = co.wrap(function * (registry, req, res) {
                     'content-length': Buffer.byteLength(body)
                 });
                 if (config.cache[registry] && req.method === 'GET' && !req.url.match(/^\/-\//) && typeof headers['etag'] === 'string') {
+                    var b;
                     try {
-                        JSON.stringify(JSON.parse(body));
-                    } catch (e) {
-                        if (!e) {
-                            dbCacheJson.put(req.url, {
-                                statusCode: response.statusCode,
-                                headers: headers,
-                                body: body,
-                                etag: headers.etag,
-                            });
-                        }
+                        var b = JSON.stringify(JSON.parse(body));
+                    } catch (e) {}
+                    if (b) {
+                        headers['content-length'] = Buffer.byteLength(b);
                     }
-                    schedule.run('update', {
-                        registry: registry,
-                        url: req.url,
+                    db.set('cache||' + registry + '||' + req.url, JSON.stringify({
+                        statusCode: response.statusCode,
+                        headers: headers,
+                        body: body,
                         etag: headers.etag,
-                    }, Date.now() + 8 * 60 * 1000 + Math.random() * 4);
+                    }));
+                    db.zadd('schedule', Date.now() + 8 * 60 * 1000 + Math.random() * 4, registry + '||' + req.url);
                 }
             }
             resolve({
@@ -295,7 +224,7 @@ server.on('request', function(req, res) {
     if (req.url.match(/\/__flush__\//)) {
         var flushUrl = req.url.substring('/__flush__'.length);
         return co(function * () {
-            yield dbCacheJson.delAsync(flushUrl);
+            yield db.delAsync(flushUrl);
             res.end('done');
         }).catch(resError);
     }
