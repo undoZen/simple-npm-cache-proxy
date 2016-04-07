@@ -1,0 +1,14 @@
+{
+  "name": "example",
+  "version": "1.0.0",
+  "description": "simple-npm-cache-proxy example server",
+  "main": "index.js",
+  "scripts": {
+    "start": "pm2 start -i 0 index.js --name simple-npm-cache-proxy",
+    "stop": "pm2 stop simple-npm-cache-proxy",
+    "reload": "pm2 reload simple-npm-cache-proxy",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "undoZen <opensource@undozen.com>",
+  "license": "ISC"
+}
