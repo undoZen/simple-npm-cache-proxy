@@ -2,7 +2,7 @@
 var path = require('path');
 module.exports = {
     redis: 'redis://127.0.0.1:6379/5',
-    updateInterval: 2000,
+    updateInterval: 120000,
     tarballCacheDir: path.join(__dirname, 'cache'),
     upstreams: [
         {
