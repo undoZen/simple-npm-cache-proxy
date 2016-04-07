@@ -10,5 +10,8 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "undoZen <opensource@undozen.com>",
-  "license": "ISC"
+  "license": "ISC",
+  "dependencies": {
+    "simple-npm-cache-proxy": "^1.0.0"
+  }
 }
