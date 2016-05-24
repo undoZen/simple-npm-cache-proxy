@@ -29,6 +29,7 @@ var log = logger({
         response: logger.stdSerializers.res
     }),
 });
+var rimraf = Promise.promisify(require('rimraf'));
 
 module.exports = function (config) {
 
@@ -193,8 +194,12 @@ module.exports = function (config) {
         if (req.url.match(/\/__flush__\//)) {
             var flushUrl = req.url.substring('/__flush__'.length);
             return co(function * () {
-                yield db.del('cache||' + flushUrl);
-                res.end('done');
+                if (/\.tgz$/i.test(flushUrl)) {
+                    yield rimraf(path.join(config.tarballCacheDir, flushUrl));
+                } else {
+                    yield db.del('cache||' + flushUrl);
+                }
+                res.end('done\n');
             }).catch(resError);
         }
         ((['GET', 'HEAD'].indexOf(req.method) === -1) ?
